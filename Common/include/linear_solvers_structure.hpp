@@ -36,6 +36,8 @@
 #include <iomanip>
 #include <string>
 
+#include <viennacl/compressed_matrix.hpp>
+#include <viennacl/linalg/bicgstab.hpp>
 #include "vector_structure.hpp"
 
 using namespace std;

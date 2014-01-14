@@ -463,6 +463,12 @@ unsigned long CSysSolve::BCGSTAB(const CSysVector & b, CSysVector & x, CMatrixVe
     writeHistory(i, norm_r, norm0);
   }
 	
+  viennacl::compressed_matrix<double> vcl_mat;
+  viennacl::vector<double> vcl_rhs;
+  viennacl::vector<double> vcl_result;
+  copy(sparse_matrix,vcl_mat);
+  copy(x,vcl_rhs);
+  vcl_result    = solve(vcl_mat, vcl_rhs, viennacl::linalg::bicgstab_tag());
   /*---  Loop over all search directions ---*/
   for (i = 0; i < m; i++) {
 		
