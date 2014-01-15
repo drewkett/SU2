@@ -22,6 +22,7 @@
  */
 
 #include "../include/linear_solvers_structure.hpp"
+#include "../include/matrix_structure.hpp"
 
 void CSysSolve::applyGivens(const double & s, const double & c, double & h1, double & h2) {
   
@@ -430,106 +431,137 @@ unsigned long CSysSolve::BCGSTAB(const CSysVector & b, CSysVector & x, CMatrixVe
 #endif
   }
 	
-  CSysVector r(b);
-  CSysVector r_0(b);
-  CSysVector p(b);
-	CSysVector v(b);
-  CSysVector s(b);
-	CSysVector t(b);
-	CSysVector phat(b);
-	CSysVector shat(b);
-  CSysVector A_x(b);
-  
-  /*--- Calculate the initial residual, compute norm, and check if system is already solved ---*/
-	mat_vec(x,A_x);
-  r -= A_x; r_0 = r; // recall, r holds b initially
-  double norm_r = r.norm();
-  double norm0 = b.norm();
-  if ( (norm_r < tol*norm0) || (norm_r < eps) ) {
-    if (rank == 0) cout << "CSysSolve::BCGSTAB(): system solved by initial guess." << endl;
-    return 0;
+  //CSysMatrixVectorProduct& sysmat_vec = dynamic_cast<CSysMatrixVectorProduct&>(mat_vec);
+  //CSysMatrix * matrix = sysmat_vec.sparse_matrix;
+  CSysMatrix * matrix = dynamic_cast<CSysMatrixVectorProduct&>(mat_vec).sparse_matrix;
+  vector< map < unsigned long, double > > cpu_sparse_matrix( matrix->nPoint * matrix->nEqn);
+  for (int iPoint = 0; iPoint < matrix->nPoint; iPoint++) {
+    for (int index = matrix->row_ptr[iPoint]; index < matrix->row_ptr[iPoint+1]; index++) {
+		for (int iVar = 0; iVar < matrix->nEqn; iVar++) {
+			for (int jVar = 0; jVar < matrix->nVar; jVar++) {
+				cpu_sparse_matrix[iPoint*matrix->nEqn+iVar][matrix->col_ind[index]*matrix->nVar+jVar] = matrix->matrix[index*matrix->nVar*matrix->nEqn+matrix->nEqn*iVar+jVar];
+			}
+		}
+	}
   }
-	
-	/*--- Initialization ---*/
-  double alpha = 1.0, beta = 1.0, omega = 1.0, rho = 1.0, rho_prime = 1.0;
-	
-  /*--- Set the norm to the initial initial residual value ---*/
-  norm0 = norm_r;
-  
-  /*--- Output header information including initial residual ---*/
-  int i = 0;
-  if ((monitoring) && (rank == 0)) {
-    writeHeader("BCGSTAB", tol, norm_r);
-    writeHistory(i, norm_r, norm0);
+  viennacl::compressed_matrix <double> vcl_sparse_matrix(matrix->nPoint*matrix->nEqn,matrix->nPoint*matrix->nVar);
+  viennacl::vector<double> vcl_rhs(matrix->nPoint*matrix->nEqn);
+  viennacl::vector<double> vcl_result(matrix->nPoint*matrix->nVar);
+
+  for (int iPoint = 0; iPoint < matrix->nPoint; iPoint++) {
+	  for (int iVar = 0; iVar < matrix->nEqn; iVar++) {
+		  vcl_rhs[iPoint*matrix->nEqn+iVar] = b[iPoint*matrix->nEqn+iVar];
+	  }
   }
-	
-  viennacl::compressed_matrix<double> vcl_mat;
-  viennacl::vector<double> vcl_rhs;
-  viennacl::vector<double> vcl_result;
-  copy(sparse_matrix,vcl_mat);
-  copy(x,vcl_rhs);
-  vcl_result    = solve(vcl_mat, vcl_rhs, viennacl::linalg::bicgstab_tag());
-  /*---  Loop over all search directions ---*/
-  for (i = 0; i < m; i++) {
-		
-		/*--- Compute rho_prime ---*/
-		rho_prime = rho;
-		
-		/*--- Compute rho_i ---*/
-		rho = dotProd(r, r_0);
-		
-		/*--- Compute beta ---*/
-		beta = (rho / rho_prime) * (alpha /omega);
-		
-		/*--- p_{i} = r_{i-1} + beta * p_{i-1} - beta * omega * v_{i-1} ---*/
-		double beta_omega = -beta*omega;
-		p.Equals_AX_Plus_BY(beta, p, beta_omega, v);
-		p.Plus_AX(1.0, r);
-		
-		/*--- Preconditioning step ---*/
-		precond(p, phat);
-		mat_vec(phat, v);
-    
-		/*--- Calculate step-length alpha ---*/
-    double r_0_v = dotProd(r_0, v);
-    alpha = rho / r_0_v;
-    
-		/*--- s_{i} = r_{i-1} - alpha * v_{i} ---*/
-		s.Equals_AX_Plus_BY(1.0, r, -alpha, v);
-		
-		/*--- Preconditioning step ---*/
-		precond(s, shat);
-		mat_vec(shat, t);
-    
-		/*--- Calculate step-length omega ---*/
-    omega = dotProd(t, s) / dotProd(t, t);
-    
-		/*--- Update solution and residual: ---*/
-    x.Plus_AX(alpha, phat); x.Plus_AX(omega, shat);
-		r.Equals_AX_Plus_BY(1.0, s, -omega, t);
-    
-    /*--- Check if solution has converged, else output the relative residual if necessary ---*/
-    norm_r = r.norm();
-    if (norm_r < tol*norm0) break;
-    if (((monitoring) && (rank == 0)) && ((i+1) % 5 == 0) && (rank == 0)) writeHistory(i+1, norm_r, norm0);
-    
+
+  copy(cpu_sparse_matrix, vcl_sparse_matrix);
+  vcl_result = viennacl::linalg::solve(vcl_sparse_matrix,vcl_rhs,viennacl::linalg::bicgstab_tag());
+  for (int iPoint = 0; iPoint < matrix->nPoint; iPoint++) {
+	  for (int iVar = 0; iVar < matrix->nVar; iVar++) {
+		  x[iPoint*matrix->nVar+iVar] = vcl_result[iPoint*matrix->nVar+iVar];
+	  }
   }
-	  
-  if ((monitoring) && (rank == 0)) {
-    cout << "# BCGSTAB final (true) residual:" << endl;
-    cout << "# Iteration = " << i << ": |res|/|res0| = "  << norm_r/norm0 << endl;
-  }
+
+  //CSysVector r(b);
+  //CSysVector r_0(b);
+  //CSysVector p(b);
+  //  CSysVector v(b);
+  //CSysVector s(b);
+  //  CSysVector t(b);
+  //  CSysVector phat(b);
+  //  CSysVector shat(b);
+  //CSysVector A_x(b);
+  //
+  ///*--- Calculate the initial residual, compute norm, and check if system is already solved ---*/
+  //  mat_vec(x,A_x);
+  //r -= A_x; r_0 = r; // recall, r holds b initially
+  //double norm_r = r.norm();
+  //double norm0 = b.norm();
+  //if ( (norm_r < tol*norm0) || (norm_r < eps) ) {
+  //  if (rank == 0) cout << "CSysSolve::BCGSTAB(): system solved by initial guess." << endl;
+  //  return 0;
+  //}
+  //  
+  //  /*--- Initialization ---*/
+  //double alpha = 1.0, beta = 1.0, omega = 1.0, rho = 1.0, rho_prime = 1.0;
+  //  
+  ///*--- Set the norm to the initial initial residual value ---*/
+  //norm0 = norm_r;
+  //
+  ///*--- Output header information including initial residual ---*/
+  //int i = 0;
+  //if ((monitoring) && (rank == 0)) {
+  //  writeHeader("BCGSTAB", tol, norm_r);
+  //  writeHistory(i, norm_r, norm0);
+  //}
+  //  
+  //viennacl::compressed_matrix<double> vcl_mat;
+  //viennacl::vector<double> vcl_rhs;
+  //viennacl::vector<double> vcl_result;
+  //copy(sparse_matrix,vcl_mat);
+  //copy(x,vcl_rhs);
+  //vcl_result    = solve(vcl_mat, vcl_rhs, viennacl::linalg::bicgstab_tag());
+  ///*---  Loop over all search directions ---*/
+  //for (i = 0; i < m; i++) {
+  //  	
+  //  	/*--- Compute rho_prime ---*/
+  //  	rho_prime = rho;
+  //  	
+  //  	/*--- Compute rho_i ---*/
+  //  	rho = dotProd(r, r_0);
+  //  	
+  //  	/*--- Compute beta ---*/
+  //  	beta = (rho / rho_prime) * (alpha /omega);
+  //  	
+  //  	/*--- p_{i} = r_{i-1} + beta * p_{i-1} - beta * omega * v_{i-1} ---*/
+  //  	double beta_omega = -beta*omega;
+  //  	p.Equals_AX_Plus_BY(beta, p, beta_omega, v);
+  //  	p.Plus_AX(1.0, r);
+  //  	
+  //  	/*--- Preconditioning step ---*/
+  //  	precond(p, phat);
+  //  	mat_vec(phat, v);
+  //  
+  //  	/*--- Calculate step-length alpha ---*/
+  //  double r_0_v = dotProd(r_0, v);
+  //  alpha = rho / r_0_v;
+  //  
+  //  	/*--- s_{i} = r_{i-1} - alpha * v_{i} ---*/
+  //  	s.Equals_AX_Plus_BY(1.0, r, -alpha, v);
+  //  	
+  //  	/*--- Preconditioning step ---*/
+  //  	precond(s, shat);
+  //  	mat_vec(shat, t);
+  //  
+  //  	/*--- Calculate step-length omega ---*/
+  //  omega = dotProd(t, s) / dotProd(t, t);
+  //  
+  //  	/*--- Update solution and residual: ---*/
+  //  x.Plus_AX(alpha, phat); x.Plus_AX(omega, shat);
+  //  	r.Equals_AX_Plus_BY(1.0, s, -omega, t);
+  //  
+  //  /*--- Check if solution has converged, else output the relative residual if necessary ---*/
+  //  norm_r = r.norm();
+  //  if (norm_r < tol*norm0) break;
+  //  if (((monitoring) && (rank == 0)) && ((i+1) % 5 == 0) && (rank == 0)) writeHistory(i+1, norm_r, norm0);
+  //  
+  //}
+  //    
+  //if ((monitoring) && (rank == 0)) {
+  //  cout << "# BCGSTAB final (true) residual:" << endl;
+  //  cout << "# Iteration = " << i << ": |res|/|res0| = "  << norm_r/norm0 << endl;
+  //}
 	
-//  /*--- Recalculate final residual (this should be optional) ---*/
+  /*--- Recalculate final residual (this should be optional) ---*/
 //	mat_vec(x, A_x);
 //  r = b; r -= A_x;
-//  double true_res = r.norm();
-//  
-//  if ((fabs(true_res - norm_r) > tol*10.0) && (rank == 0)) {
-//    cout << "# WARNING in CSysSolve::BCGSTAB(): " << endl;
-//    cout << "# true residual norm and calculated residual norm do not agree." << endl;
-//    cout << "# true_res - calc_res = " << true_res <<" "<< norm_r << endl;
-//  }
+  //double true_res = r.norm();
+  //
+  //if ((fabs(true_res - norm_r) > tol*10.0) && (rank == 0)) {
+  //  cout << "# WARNING in CSysSolve::BCGSTAB(): " << endl;
+  //  cout << "# true residual norm and calculated residual norm do not agree." << endl;
+  //  cout << "# true_res - calc_res = " << true_res <<" "<< norm_r << endl;
+  //}
 	
-	return i;
+	return 1;
 }

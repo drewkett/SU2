@@ -353,8 +353,7 @@ public:
 class CMatrixVectorProduct {
 public:
   virtual ~CMatrixVectorProduct() = 0; ///< class destructor
-  virtual void operator()(const CSysVector & u, CSysVector & v)
-  const = 0; ///< matrix-vector product operation
+  virtual void operator()(const CSysVector & u, CSysVector & v) const = 0; ///< matrix-vector product operation
 };
 inline CMatrixVectorProduct::~CMatrixVectorProduct() {}
 

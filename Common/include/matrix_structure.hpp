@@ -42,7 +42,7 @@ using namespace std;
  * \version 2.0.10
  */
 class CSysMatrix {
-private:
+public:
 	unsigned long nPoint,   /*!< \brief Number of points in the grid. */
 	nPointDomain,           /*!< \brief Number of points in the grid. */
 	nVar,                   /*!< \brief Number of variables. */
@@ -65,7 +65,6 @@ private:
   *LyVector, *FzVector, *AuxVector;           /*!< \brief Arrays of the Linelet preconditioner methodology. */
   unsigned long max_nElem;
   
-public:
   
 	/*!
 	 * \brief Constructor of the class.
@@ -376,12 +375,11 @@ public:
  * \brief specialization of matrix-vector product that uses CSysMatrix class
  */
 class CSysMatrixVectorProduct : public CMatrixVectorProduct {
-private:
+public:
 	CSysMatrix* sparse_matrix; /*!< \brief pointer to matrix that defines the product. */
 	CGeometry* geometry; /*!< \brief pointer to matrix that defines the geometry. */
 	CConfig* config; /*!< \brief pointer to matrix that defines the config. */
   
-public:
   
 	/*!
 	 * \brief constructor of the class
