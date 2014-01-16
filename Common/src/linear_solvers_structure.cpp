@@ -22,6 +22,13 @@
  */
 
 #include "../include/linear_solvers_structure.hpp"
+
+#include "viennacl/scalar.hpp"
+#include "viennacl/vector.hpp"
+#include "viennacl/compressed_matrix.hpp"
+#include "viennacl/linalg/bicgstab.hpp"
+#include "viennacl/linalg/jacobi_precond.hpp"
+
 #include "../include/matrix_structure.hpp"
 
 void CSysSolve::applyGivens(const double & s, const double & c, double & h1, double & h2) {
@@ -431,36 +438,31 @@ unsigned long CSysSolve::BCGSTAB(const CSysVector & b, CSysVector & x, CMatrixVe
 #endif
   }
 	
-  //CSysMatrixVectorProduct& sysmat_vec = dynamic_cast<CSysMatrixVectorProduct&>(mat_vec);
-  //CSysMatrix * matrix = sysmat_vec.sparse_matrix;
   CSysMatrix * matrix = dynamic_cast<CSysMatrixVectorProduct&>(mat_vec).sparse_matrix;
   vector< map < unsigned long, double > > cpu_sparse_matrix( matrix->nPoint * matrix->nEqn);
   for (int iPoint = 0; iPoint < matrix->nPoint; iPoint++) {
     for (int index = matrix->row_ptr[iPoint]; index < matrix->row_ptr[iPoint+1]; index++) {
-		for (int iVar = 0; iVar < matrix->nEqn; iVar++) {
-			for (int jVar = 0; jVar < matrix->nVar; jVar++) {
-				cpu_sparse_matrix[iPoint*matrix->nEqn+iVar][matrix->col_ind[index]*matrix->nVar+jVar] = matrix->matrix[index*matrix->nVar*matrix->nEqn+matrix->nEqn*iVar+jVar];
-			}
-		}
-	}
+    	for (int iVar = 0; iVar < matrix->nEqn; iVar++) {
+    		for (int jVar = 0; jVar < matrix->nVar; jVar++) {
+    			cpu_sparse_matrix[iPoint*matrix->nEqn+iVar][matrix->col_ind[index]*matrix->nVar+jVar] = matrix->matrix[index*matrix->nVar*matrix->nEqn+matrix->nEqn*iVar+jVar];
+    		}
+    	}
+    }
   }
   viennacl::compressed_matrix <double> vcl_sparse_matrix(matrix->nPoint*matrix->nEqn,matrix->nPoint*matrix->nVar);
   viennacl::vector<double> vcl_rhs(matrix->nPoint*matrix->nEqn);
   viennacl::vector<double> vcl_result(matrix->nPoint*matrix->nVar);
+  vector<double> cpu_result(matrix->nPoint*matrix->nVar);
 
-  for (int iPoint = 0; iPoint < matrix->nPoint; iPoint++) {
-	  for (int iVar = 0; iVar < matrix->nEqn; iVar++) {
-		  vcl_rhs[iPoint*matrix->nEqn+iVar] = b[iPoint*matrix->nEqn+iVar];
-	  }
-  }
+  vector<double> cpu_rhs(b.vec_val,b.vec_val+matrix->nPoint*matrix->nVar);
 
   copy(cpu_sparse_matrix, vcl_sparse_matrix);
-  vcl_result = viennacl::linalg::solve(vcl_sparse_matrix,vcl_rhs,viennacl::linalg::bicgstab_tag());
-  for (int iPoint = 0; iPoint < matrix->nPoint; iPoint++) {
-	  for (int iVar = 0; iVar < matrix->nVar; iVar++) {
-		  x[iPoint*matrix->nVar+iVar] = vcl_result[iPoint*matrix->nVar+iVar];
-	  }
-  }
+  copy(cpu_rhs,vcl_rhs);
+  viennacl::linalg::jacobi_precond< viennacl::compressed_matrix<double> > vcl_jacobi (vcl_sparse_matrix, viennacl::linalg::jacobi_tag());
+
+  vcl_result = viennacl::linalg::solve(vcl_sparse_matrix,vcl_rhs,viennacl::linalg::bicgstab_tag(1e-6,20),vcl_jacobi);
+  copy(vcl_result,cpu_rhs);
+  copy(cpu_rhs.begin(),cpu_rhs.end(),x.vec_val);
 
   //CSysVector r(b);
   //CSysVector r_0(b);
@@ -495,12 +497,6 @@ unsigned long CSysSolve::BCGSTAB(const CSysVector & b, CSysVector & x, CMatrixVe
   //  writeHistory(i, norm_r, norm0);
   //}
   //  
-  //viennacl::compressed_matrix<double> vcl_mat;
-  //viennacl::vector<double> vcl_rhs;
-  //viennacl::vector<double> vcl_result;
-  //copy(sparse_matrix,vcl_mat);
-  //copy(x,vcl_rhs);
-  //vcl_result    = solve(vcl_mat, vcl_rhs, viennacl::linalg::bicgstab_tag());
   ///*---  Loop over all search directions ---*/
   //for (i = 0; i < m; i++) {
   //  	
