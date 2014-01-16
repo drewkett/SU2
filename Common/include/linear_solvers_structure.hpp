@@ -36,8 +36,6 @@
 #include <iomanip>
 #include <string>
 
-#include <viennacl/compressed_matrix.hpp>
-#include <viennacl/linalg/bicgstab.hpp>
 #include "vector_structure.hpp"
 
 using namespace std;
@@ -185,6 +183,9 @@ public:
    * \param[in] monitoring - turn on priting residuals from solver to screen.
    */
   unsigned long BCGSTAB(const CSysVector & b, CSysVector & x, CMatrixVectorProduct & mat_vec,
+                        CPreconditioner & precond, double tol,
+                        unsigned long m, bool monitoring);
+  unsigned long BCGSTAB_CUDA(const CSysVector & b, CSysVector & x, CMatrixVectorProduct & mat_vec,
                         CPreconditioner & precond, double tol,
                         unsigned long m, bool monitoring);
   

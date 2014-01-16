@@ -53,7 +53,7 @@ const double eps = numeric_limits<double>::epsilon(); /*!< \brief machine epsilo
  */
 class CSysVector {
   
-private:
+public:
   
 	unsigned long nElm; /*!< \brief total number of elements (or number elements on this processor) */
 	unsigned long nElmDomain; /*!< \brief total number of elements (or number elements on this processor without Ghost cells) */
@@ -64,7 +64,6 @@ private:
   unsigned long myrank; /*!< \brief processor rank (only used for parallel runs) */
   double* vec_val; /*!< \brief storage for the element values */
   
-public:
   
   /*!
    * \brief default constructor of the class.
