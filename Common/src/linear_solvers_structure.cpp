@@ -28,6 +28,9 @@
 #include "viennacl/compressed_matrix.hpp"
 #include "viennacl/linalg/bicgstab.hpp"
 #include "viennacl/linalg/jacobi_precond.hpp"
+#include "viennacl/linalg/ilu.hpp"
+
+#include <sys/time.h>
 
 #include "../include/matrix_structure.hpp"
 
@@ -438,6 +441,9 @@ unsigned long CSysSolve::BCGSTAB(const CSysVector & b, CSysVector & x, CMatrixVe
 #endif
   }
 	
+  struct timeval current, last;
+  double diff;
+  gettimeofday(&last,NULL);
   CSysMatrix * matrix = dynamic_cast<CSysMatrixVectorProduct&>(mat_vec).sparse_matrix;
   vector< map < unsigned long, double > > cpu_sparse_matrix( matrix->nPoint * matrix->nEqn);
   for (int iPoint = 0; iPoint < matrix->nPoint; iPoint++) {
@@ -449,20 +455,56 @@ unsigned long CSysSolve::BCGSTAB(const CSysVector & b, CSysVector & x, CMatrixVe
     	}
     }
   }
+  gettimeofday(&current,NULL);
+  diff = current.tv_sec-last.tv_sec;
+  diff += 1.e-6*(current.tv_usec-last.tv_usec);
+  cerr << "Copy A -> cpu A took " << diff << endl;
+  last = current;
   viennacl::compressed_matrix <double> vcl_sparse_matrix(matrix->nPoint*matrix->nEqn,matrix->nPoint*matrix->nVar);
   viennacl::vector<double> vcl_rhs(matrix->nPoint*matrix->nEqn);
   viennacl::vector<double> vcl_result(matrix->nPoint*matrix->nVar);
   vector<double> cpu_result(matrix->nPoint*matrix->nVar);
 
   vector<double> cpu_rhs(b.vec_val,b.vec_val+matrix->nPoint*matrix->nVar);
+  gettimeofday(&current,NULL);
+  diff = current.tv_sec-last.tv_sec;
+  diff += 1.e-6*(current.tv_usec-last.tv_usec);
+  cerr << "Copy b -> cpu b took " << diff << endl;
+  last = current;
 
   copy(cpu_sparse_matrix, vcl_sparse_matrix);
+  gettimeofday(&current,NULL);
+  diff = current.tv_sec-last.tv_sec;
+  diff += 1.e-6*(current.tv_usec-last.tv_usec);
+  cerr << "Copy cpu A -> gpu A took " << diff << endl;
+  last = current;
   copy(cpu_rhs,vcl_rhs);
+  gettimeofday(&current,NULL);
+  diff = current.tv_sec-last.tv_sec;
+  diff += 1.e-6*(current.tv_usec-last.tv_usec);
+  cerr << "Copy cpu b -> gpu b took " << diff << endl;
+  last = current;
   viennacl::linalg::jacobi_precond< viennacl::compressed_matrix<double> > vcl_jacobi (vcl_sparse_matrix, viennacl::linalg::jacobi_tag());
+  //viennacl::linalg::block_ilu_precond< viennacl::compressed_matrix<double>, viennacl::linalg::ilu0_tag> vcl_block_ilu (vcl_sparse_matrix, viennacl::linalg::ilu0_tag(true));
 
   vcl_result = viennacl::linalg::solve(vcl_sparse_matrix,vcl_rhs,viennacl::linalg::bicgstab_tag(1e-6,20),vcl_jacobi);
+  gettimeofday(&current,NULL);
+  diff = current.tv_sec-last.tv_sec;
+  diff += 1.e-6*(current.tv_usec-last.tv_usec);
+  cerr << "Solve took " << diff << endl;
+  last = current;
   copy(vcl_result,cpu_rhs);
+  gettimeofday(&current,NULL);
+  diff = current.tv_sec-last.tv_sec;
+  diff += 1.e-6*(current.tv_usec-last.tv_usec);
+  cerr << "Copy gpu x -> cpu x took " << diff << endl;
+  last = current;
   copy(cpu_rhs.begin(),cpu_rhs.end(),x.vec_val);
+  gettimeofday(&current,NULL);
+  diff = current.tv_sec-last.tv_sec;
+  diff += 1.e-6*(current.tv_usec-last.tv_usec);
+  cerr << "Copy cpu x -> x took " << diff << endl;
+  last = current;
 
   //CSysVector r(b);
   //CSysVector r_0(b);
