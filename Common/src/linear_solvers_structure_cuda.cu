@@ -26,12 +26,14 @@
 
 #include "../include/linear_solvers_structure.hpp"
 
-#include "viennacl/scalar.hpp"
-#include "viennacl/vector.hpp"
-#include "viennacl/compressed_matrix.hpp"
-#include "viennacl/linalg/bicgstab.hpp"
-#include "viennacl/linalg/jacobi_precond.hpp"
+//#include "viennacl/scalar.hpp"
+//#include "viennacl/vector.hpp"
+//#include "viennacl/compressed_matrix.hpp"
+//#include "viennacl/linalg/bicgstab.hpp"
+//#include "viennacl/linalg/jacobi_precond.hpp"
 //#include "viennacl/linalg/ilu.hpp"
+#include "cusparse_v2.h"
+#include "cublas_v2.h"
 
 #include <sys/time.h>
 
@@ -69,65 +71,221 @@ unsigned long CSysSolve::BCGSTAB_CUDA(const CSysVector & b, CSysVector & x, CMat
   double diff;
   gettimeofday(&last,NULL);
   CSysMatrix * matrix = dynamic_cast<CSysMatrixVectorProduct&>(mat_vec).sparse_matrix;
-  vector< map < unsigned long, double > > cpu_sparse_matrix( matrix->nPoint * matrix->nEqn);
-  for (int iPoint = 0; iPoint < matrix->nPoint; iPoint++) {
-    for (int index = matrix->row_ptr[iPoint]; index < matrix->row_ptr[iPoint+1]; index++) {
-    	for (int iVar = 0; iVar < matrix->nEqn; iVar++) {
-    		for (int jVar = 0; jVar < matrix->nVar; jVar++) {
-    			cpu_sparse_matrix[iPoint*matrix->nEqn+iVar][matrix->col_ind[index]*matrix->nVar+jVar] = matrix->matrix[index*matrix->nVar*matrix->nEqn+matrix->nEqn*iVar+jVar];
-    		}
-    	}
-    }
-  }
-  gettimeofday(&current,NULL);
-  diff = current.tv_sec-last.tv_sec;
-  diff += 1.e-6*(current.tv_usec-last.tv_usec);
-  cerr << "Copy A -> cpu A took " << diff << endl;
-  last = current;
-  viennacl::compressed_matrix <double> vcl_sparse_matrix(matrix->nPoint*matrix->nEqn,matrix->nPoint*matrix->nVar);
-  viennacl::vector<double> vcl_rhs(matrix->nPoint*matrix->nEqn);
-  viennacl::vector<double> vcl_result(matrix->nPoint*matrix->nVar);
-  vector<double> cpu_result(matrix->nPoint*matrix->nVar);
+  double *d_A,*d_b,*d_x;
+  int *d_row_ptr, *d_col_ind;
+  int *row_ptr = new int[matrix->nPoint+1];
+  int *col_ind = new int[matrix->nnz];
+  for (int i=0; i < matrix->nPoint+1; i++)
+	  row_ptr[i] = matrix->row_ptr[i];
 
-  vector<double> cpu_rhs(b.vec_val,b.vec_val+matrix->nPoint*matrix->nVar);
+  for (int i=0; i < matrix->nnz; i++)
+	  col_ind[i] = matrix->col_ind[i];
+
+  cudaMalloc(&d_A,matrix->nnz*matrix->nVar*matrix->nEqn*sizeof(double));
+  cudaMalloc(&d_row_ptr,(matrix->nPoint+1)*sizeof(int));
+  cudaMalloc(&d_col_ind,matrix->nnz*sizeof(int));
+  cudaMalloc(&d_b,matrix->nPoint*matrix->nEqn*sizeof(double));
+  cudaMalloc(&d_x,matrix->nPoint*matrix->nVar*sizeof(double));
+  cudaMemcpy(d_A,matrix->matrix,matrix->nnz*matrix->nVar*matrix->nEqn*sizeof(double),cudaMemcpyHostToDevice);
+  cudaMemcpy(d_row_ptr,row_ptr,(matrix->nPoint+1)*sizeof(int),cudaMemcpyHostToDevice);
+  cudaMemcpy(d_col_ind,col_ind,matrix->nnz*sizeof(int),cudaMemcpyHostToDevice);
+  cudaMemcpy(d_b,b.vec_val,matrix->nPoint*matrix->nEqn*sizeof(double),cudaMemcpyHostToDevice);
+  cudaMemcpy(d_x,x.vec_val,matrix->nPoint*matrix->nVar*sizeof(double),cudaMemcpyHostToDevice);
+	cudaDeviceSynchronize();
   gettimeofday(&current,NULL);
   diff = current.tv_sec-last.tv_sec;
   diff += 1.e-6*(current.tv_usec-last.tv_usec);
-  cerr << "Copy b -> cpu b took " << diff << endl;
+  cerr << "Copy -> gpu took " << diff << endl;
+  last = current;
+    
+    
+  double *d_r,*d_r0;
+  cudaMalloc(&d_r,matrix->nPoint*matrix->nEqn*sizeof(double));
+  cudaMalloc(&d_r0,matrix->nPoint*matrix->nEqn*sizeof(double));
+  cudaMemcpy(d_r,b.vec_val,matrix->nPoint*matrix->nEqn*sizeof(double),cudaMemcpyHostToDevice);
+  CSysVector r(b);
+  CSysVector r_0(b);
+  CSysVector p(b);
+	CSysVector v(b);
+  CSysVector s(b);
+	CSysVector t(b);
+	CSysVector phat(b);
+	CSysVector shat(b);
+  CSysVector A_x(b);
+	cudaDeviceSynchronize();
+  gettimeofday(&current,NULL);
+  diff = current.tv_sec-last.tv_sec;
+  diff += 1.e-6*(current.tv_usec-last.tv_usec);
+  cerr << "CSysVector init" << diff << endl;
+  last = current;
+  
+  /*--- Calculate the initial residual, compute norm, and check if system is already solved ---*/
+  cusparseMatDescr_t descr;
+  cusparseHandle_t handle;
+  cublasHandle_t blas_handle;
+  cusparseDirection_t dir = CUSPARSE_DIRECTION_ROW;
+  cusparseOperation_t trans = CUSPARSE_OPERATION_NON_TRANSPOSE;
+  cusparseCreate(&handle);
+  cublasCreate(&blas_handle);
+  cusparseCreateMatDescr(&descr);
+  double g_alpha = -1.;
+  double g_beta = 1.;
+	cudaDeviceSynchronize();
+  gettimeofday(&current,NULL);
+  diff = current.tv_sec-last.tv_sec;
+  diff += 1.e-6*(current.tv_usec-last.tv_usec);
+  cerr << "cuda init  " << diff << endl;
   last = current;
 
-  copy(cpu_sparse_matrix, vcl_sparse_matrix);
+  cusparseDbsrmv(handle,dir,trans,matrix->nPoint,matrix->nPoint,matrix->nnz,&g_alpha,descr,d_A,d_row_ptr,d_col_ind,matrix->nVar,d_x,&g_beta,d_r);
+  cudaDeviceSynchronize();
   gettimeofday(&current,NULL);
   diff = current.tv_sec-last.tv_sec;
   diff += 1.e-6*(current.tv_usec-last.tv_usec);
-  cerr << "Copy cpu A -> gpu A took " << diff << endl;
+  cerr << "calc Ax gpu" << diff << endl;
   last = current;
-  copy(cpu_rhs,vcl_rhs);
+  cublasDcopy(blas_handle,matrix->nPoint*matrix->nEqn,d_r,1.,d_r0,1.);
+  cudaDeviceSynchronize();
   gettimeofday(&current,NULL);
   diff = current.tv_sec-last.tv_sec;
   diff += 1.e-6*(current.tv_usec-last.tv_usec);
-  cerr << "Copy cpu b -> gpu b took " << diff << endl;
+  cerr << "copy d_r to d_r0 " << diff << endl;
   last = current;
-  viennacl::linalg::jacobi_precond< viennacl::compressed_matrix<double> > vcl_jacobi (vcl_sparse_matrix, viennacl::linalg::jacobi_tag());
-  //viennacl::linalg::block_ilu_precond< viennacl::compressed_matrix<double>, viennacl::linalg::ilu0_tag> vcl_block_ilu (vcl_sparse_matrix, viennacl::linalg::ilu0_tag(true));
+  cerr << "nPoint = " << matrix->nPoint << endl;
+  cerr << "nnz = " << matrix->nnz << endl;
+  cerr << "nVar = " << matrix->nVar << endl;
+  cerr << "nEqn = " << matrix->nEqn << endl;
+  //cudaMemcpy(r_0.vec_val,d_r,matrix->nPoint*matrix->nEqn*sizeof(double),cudaMemcpyDeviceToHost);
+  //gettimeofday(&current,NULL);
+  //diff = current.tv_sec-last.tv_sec;
+  //diff += 1.e-6*(current.tv_usec-last.tv_usec);
+  //cerr << "r_0 copy" << diff << endl;
+  //last = current;&
+  //cublasSetPointerMode(blas_handle, CUBLAS_POINTER_MODE_DEVICE);
 
-  vcl_result = viennacl::linalg::solve(vcl_sparse_matrix,vcl_rhs,viennacl::linalg::bicgstab_tag(1e-6,20),vcl_jacobi);
+	//double *d_norm0, *d_norm_r;
+	//cudaMalloc(&d_norm_r,sizeof(double));
+	//cudaMalloc(&d_norm0,sizeof(double));
+	//cublasDnrm2(blas_handle,matrix->nPoint*matrix->nEqn,d_r,1.,d_norm_r);
+	//cublasDnrm2(blas_handle,matrix->nPoint*matrix->nEqn,d_b,1.,d_norm0);
+	double norm0, norm_r;
+	cublasDnrm2(blas_handle,matrix->nPoint*matrix->nEqn,d_r,1.,&norm_r);
+	cudaDeviceSynchronize();
   gettimeofday(&current,NULL);
   diff = current.tv_sec-last.tv_sec;
   diff += 1.e-6*(current.tv_usec-last.tv_usec);
-  cerr << "Solve took " << diff << endl;
+  cerr << "calc/copy norm_r " << diff << endl;
   last = current;
-  copy(vcl_result,cpu_rhs);
+	cublasDnrm2(blas_handle,matrix->nPoint*matrix->nEqn,d_b,1.,&norm0);
+	cudaDeviceSynchronize();
   gettimeofday(&current,NULL);
   diff = current.tv_sec-last.tv_sec;
   diff += 1.e-6*(current.tv_usec-last.tv_usec);
-  cerr << "Copy gpu x -> cpu x took " << diff << endl;
+  cerr << "calc/copy norm_r " << diff << endl;
   last = current;
-  copy(cpu_rhs.begin(),cpu_rhs.end(),x.vec_val);
+
+	double *d_rho, *d_rho_prime;
+	cudaMalloc(&d_rho,sizeof(double));
+	cudaMalloc(&d_rho_prime,sizeof(double));
+
+	double alpha = 1.0, beta = 1.0, omega = 1.0;
+	//*d_norm0 = *d_norm_r;
   gettimeofday(&current,NULL);
   diff = current.tv_sec-last.tv_sec;
   diff += 1.e-6*(current.tv_usec-last.tv_usec);
-  cerr << "Copy cpu x -> x took " << diff << endl;
+  cerr << "setup " << diff << endl;
   last = current;
+    for (int i = 0; i < m; i++) {
+		 //cublasDcopy(blas_handle,1,d_rho,1.,d_rho_prime,1.);
+		/*--- Compute rho_i ---*/
+		//cublasDdot(blas_handle,matrix->nPoint*matrix->nEqn,d_r,1.,d_r0,1.,d_rho);
+		
+		/*--- Compute beta ---*/
+		//beta = (rho / rho_prime) * (alpha /omega);
+	}
+  gettimeofday(&current,NULL);
+  diff = current.tv_sec-last.tv_sec;
+  diff += 1.e-6*(current.tv_usec-last.tv_usec);
+  cerr << "end loop " << diff << endl;
+  last = current;
+
+	mat_vec(x,A_x);
+    r -= A_x; r_0 = r; // recall, r holds b initially
+  gettimeofday(&current,NULL);
+  diff = current.tv_sec-last.tv_sec;
+  diff += 1.e-6*(current.tv_usec-last.tv_usec);
+  cerr << "calc Ax cpu " << diff << endl;
+  last = current;
+    norm_r = r.norm();
+	cerr << "norm_r = " << norm_r << endl;
+  gettimeofday(&current,NULL);
+  diff = current.tv_sec-last.tv_sec;
+  diff += 1.e-6*(current.tv_usec-last.tv_usec);
+  cerr << "calc norm_r cpu " << diff << endl;
+//  last = current;
+//  double norm0 = b.norm();
+//  if ( (norm_r < tol*norm0) || (norm_r < eps) ) {
+//    if (rank == 0) cout << "CSysSolve::BCGSTAB(): system solved by initial guess." << endl;
+//    return 0;
+//  }
+//	
+//	/*--- Initialization ---*/
+//  double alpha = 1.0, beta = 1.0, omega = 1.0, rho = 1.0, rho_prime = 1.0;
+//	
+//  /*--- Set the norm to the initial initial residual value ---*/
+//  norm0 = norm_r;
+//  
+//  /*--- Output header information including initial residual ---*/
+//  int i = 0;
+//  if ((monitoring) && (rank == 0)) {
+//    writeHeader("BCGSTAB", tol, norm_r);
+//    writeHistory(i, norm_r, norm0);
+//  }
+//	
+//  /*---  Loop over all search directions ---*/
+//  for (i = 0; i < m; i++) {
+//		
+//		/*--- Compute rho_prime ---*/
+//		rho_prime = rho;
+//		
+//		/*--- Compute rho_i ---*/
+//		rho = dotProd(r, r_0);
+//		
+//		/*--- Compute beta ---*/
+//		beta = (rho / rho_prime) * (alpha /omega);
+//		
+//		/*--- p_{i} = r_{i-1} + beta * p_{i-1} - beta * omega * v_{i-1} ---*/
+//		double beta_omega = -beta*omega;
+//		p.Equals_AX_Plus_BY(beta, p, beta_omega, v);
+//		p.Plus_AX(1.0, r);
+//		
+//		/*--- Preconditioning step ---*/
+//		precond(p, phat);
+//		mat_vec(phat, v);
+//    
+//		/*--- Calculate step-length alpha ---*/
+//    double r_0_v = dotProd(r_0, v);
+//    alpha = rho / r_0_v;
+//    
+//		/*--- s_{i} = r_{i-1} - alpha * v_{i} ---*/
+//		s.Equals_AX_Plus_BY(1.0, r, -alpha, v);
+//		
+//		/*--- Preconditioning step ---*/
+//		precond(s, shat);
+//		mat_vec(shat, t);
+//    
+//		/*--- Calculate step-length omega ---*/
+//    omega = dotProd(t, s) / dotProd(t, t);
+//    
+//		/*--- Update solution and residual: ---*/
+//    x.Plus_AX(alpha, phat); x.Plus_AX(omega, shat);
+//		r.Equals_AX_Plus_BY(1.0, s, -omega, t);
+//    
+//    /*--- Check if solution has converged, else output the relative residual if necessary ---*/
+//    norm_r = r.norm();
+//    if (norm_r < tol*norm0) break;
+//    if (((monitoring) && (rank == 0)) && ((i+1) % 5 == 0) && (rank == 0)) writeHistory(i+1, norm_r, norm0);
+//    
+//  }
 	return 1;
 }
