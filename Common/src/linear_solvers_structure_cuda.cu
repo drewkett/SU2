@@ -35,7 +35,7 @@
 //#include "cusparse_v2.h"
 //#include "cublas_v2.h"
 
-#define NSHARED 2
+#define NSHARED 3
 #include <sys/time.h>
 
 #include "../include/matrix_structure.hpp"
@@ -43,31 +43,34 @@
 __global__ void matmul(const double *A, unsigned long *row_ptr, unsigned long *col_ind, unsigned long nPoint, unsigned long nVar, unsigned long nEqn, double *x,double *r) {
 
   extern __shared__ double block[];
-  int iBlock, jBlock, iVar, jVar, index,block_index;
-  iBlock = blockIdx.x*gridDim.y + blockIdx.y;
+  int iBlock, jBlock, iVar, jVar, index, block_index;
+  iBlock = 2*(blockIdx.x*gridDim.y + blockIdx.y);
   iVar = threadIdx.x;
   block[0] = row_ptr[iBlock];
   block[1] = row_ptr[iBlock+1];
+  block[2] = row_ptr[iBlock+2];
   __syncthreads();
+  iBlock = 2*(blockIdx.x*gridDim.y + blockIdx.y) + threadIdx.z;
   if (iBlock >= nPoint) return;
-  block[NSHARED+threadIdx.x*blockDim.y+threadIdx.y] = 0.;
+  block_index = NSHARED+threadIdx.z*blockDim.y*blockDim.x+threadIdx.x*blockDim.y+threadIdx.y;
+  block[block_index] = 0.;
   //if (threadIdx.x >= row_ptr[iBlock+1]-row_ptr[iBlock]) return;
   //index = row_ptr[iBlock]+threadIdx.y;
-  if (threadIdx.y >= block[1]-block[0]) return;
-  index = block[0]+threadIdx.y;
+  if (threadIdx.y >= block[1+threadIdx.z]-block[threadIdx.z]) return;
+  index = block[threadIdx.z]+threadIdx.y;
   jBlock = col_ind[index];
   double sum = 0.;
   for (jVar = 0; jVar < nVar; jVar++) {
     sum -= A[index*nVar*nEqn+iVar*nVar+jVar]*x[jBlock*nVar+jVar];
   }
-  block[NSHARED+threadIdx.x*blockDim.y+threadIdx.y] = sum;
+  block[block_index] = sum;
   if (threadIdx.y) return;
   __syncthreads();
   //for (index = 1; index < row_ptr[iBlock+1]-row_ptr[iBlock]; index++) {
-  for (index = 1; index < block[1]-block[0]; index++) {
-    block[NSHARED+threadIdx.x*blockDim.y] += block[NSHARED+threadIdx.x*blockDim.y+index];
+  for (index = 1; index < block[threadIdx.z+1]-block[threadIdx.z]; index++) {
+    block[block_index] += block[block_index+index];
   }
-  r[iBlock*nEqn+iVar] += block[NSHARED+threadIdx.x*blockDim.y];
+  r[iBlock*nEqn+iVar] += block[block_index];
 }
 
 //__device__ double atomicAdd(double* address, double val)
@@ -290,6 +293,7 @@ unsigned long CSysSolve::BCGSTAB_CUDA(const CSysVector & b, CSysVector & x, CMat
   dim3 blockdim;
   blockdim.x = matrix->nVar;
   blockdim.y = 0;
+  blockdim.z = 2;
   for (i=0; i < matrix->nPoint; i++) {
 	  int d = matrix->row_ptr[i+1]-matrix->row_ptr[i];
 	  if (d > blockdim.y) {
@@ -302,7 +306,7 @@ unsigned long CSysSolve::BCGSTAB_CUDA(const CSysVector & b, CSysVector & x, CMat
   cerr << "calc blockdim " << diff << endl;
   last = current;
 
-  int shared_mem = (NSHARED + blockdim.x*blockdim.y)*sizeof(double);
+  int shared_mem = (NSHARED + blockdim.x*blockdim.y*blockdim.z)*sizeof(double);
   //griddim.z = matrix->nVar;
   //matmul<<<griddim,1>>>(d_A,d_row_ptr,d_col_ind,matrix->nPoint,matrix->nVar,matrix->nEqn,-1.,d_x,d_r);
   matmul<<<griddim,blockdim,shared_mem>>>(d_A,d_row_ptr,d_col_ind,matrix->nPoint,matrix->nVar,matrix->nEqn,d_x,d_r);
