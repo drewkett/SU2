@@ -32,12 +32,82 @@
 //#include "viennacl/linalg/bicgstab.hpp"
 //#include "viennacl/linalg/jacobi_precond.hpp"
 //#include "viennacl/linalg/ilu.hpp"
-#include "cusparse_v2.h"
-#include "cublas_v2.h"
+//#include "cusparse_v2.h"
+//#include "cublas_v2.h"
 
+#define NSHARED 2
 #include <sys/time.h>
 
 #include "../include/matrix_structure.hpp"
+
+__global__ void matmul(const double *A, unsigned long *row_ptr, unsigned long *col_ind, unsigned long nPoint, unsigned long nVar, unsigned long nEqn, double *x,double *r) {
+
+  extern __shared__ double block[];
+  int iBlock, jBlock, iVar, jVar, index,block_index;
+  iBlock = blockIdx.x*gridDim.y + blockIdx.y;
+  iVar = threadIdx.x;
+  block[0] = row_ptr[iBlock];
+  block[1] = row_ptr[iBlock+1];
+  __syncthreads();
+  if (iBlock >= nPoint) return;
+  block[NSHARED+threadIdx.x*blockDim.y+threadIdx.y] = 0.;
+  //if (threadIdx.x >= row_ptr[iBlock+1]-row_ptr[iBlock]) return;
+  //index = row_ptr[iBlock]+threadIdx.y;
+  if (threadIdx.y >= block[1]-block[0]) return;
+  index = block[0]+threadIdx.y;
+  jBlock = col_ind[index];
+  double sum = 0.;
+  for (jVar = 0; jVar < nVar; jVar++) {
+    sum -= A[index*nVar*nEqn+iVar*nVar+jVar]*x[jBlock*nVar+jVar];
+  }
+  block[NSHARED+threadIdx.x*blockDim.y+threadIdx.y] = sum;
+  if (threadIdx.y) return;
+  __syncthreads();
+  //for (index = 1; index < row_ptr[iBlock+1]-row_ptr[iBlock]; index++) {
+  for (index = 1; index < block[1]-block[0]; index++) {
+    block[NSHARED+threadIdx.x*blockDim.y] += block[NSHARED+threadIdx.x*blockDim.y+index];
+  }
+  r[iBlock*nEqn+iVar] += block[NSHARED+threadIdx.x*blockDim.y];
+}
+
+//__device__ double atomicAdd(double* address, double val)
+//{
+//    unsigned long long int* address_as_ull =
+//                             (unsigned long long int*)address;
+//    unsigned long long int old = *address_as_ull, assumed;
+//    do {
+//        assumed = old;
+//old = atomicCAS(address_as_ull, assumed,
+//                        __double_as_longlong(val +
+//                               __longlong_as_double(assumed)));
+//    } while (assumed != old);
+//    return __longlong_as_double(old);
+//}
+//
+//__global__ void matmul_block(double *A, unsigned long *row_ptr, unsigned long *col_ind, unsigned long nPoint, unsigned long nVar, unsigned long nEqn, double alpha,double *x,double *r) {
+//
+//  unsigned long iBlock, jBlock, iVar, jVar, index, row_index;
+//  index = blockIdx.x*blockDim.x+threadIdx.x;
+//  if (index >= row_ptr[nPoint]) return;
+//  jBlock = col_ind[index];
+//  for (row_index = 0; row_index < nPoint; row_index++) {
+//    if (index >= row_ptr[row_index]) {
+//	  iBlock = row_index;
+//	  break;
+//	}
+//  }
+//  for (iVar = 0; iVar < nEqn; iVar++) {
+//    for (jVar = 0; jVar < nVar; jVar++) {
+//      r[iBlock*nEqn+iVar] += alpha*A[index*nVar*nEqn+iVar*nVar+jVar]*x[jBlock*nVar+jVar];
+//     // atomicAdd(&r[iBlock*nEqn+iVar],alpha*A[index*nVar*nEqn+iVar*nVar+jVar]*x[jBlock*nVar+jVar]);
+//  	}
+//  }
+//}
+
+void cudasafe(char*message, cudaError_t error)
+{
+	if(error!=cudaSuccess) { fprintf(stderr,"ERROR: %s : %i\n",message,error); exit(-1); }
+}
 
 unsigned long CSysSolve::BCGSTAB_CUDA(const CSysVector & b, CSysVector & x, CMatrixVectorProduct & mat_vec,
                                  CPreconditioner & precond, double tol, unsigned long m, bool monitoring) {
@@ -66,45 +136,40 @@ unsigned long CSysSolve::BCGSTAB_CUDA(const CSysVector & b, CSysVector & x, CMat
 #endif
 #endif
   }
-	
   struct timeval current, last;
   double diff;
   gettimeofday(&last,NULL);
+
   CSysMatrix * matrix = dynamic_cast<CSysMatrixVectorProduct&>(mat_vec).sparse_matrix;
-  double *d_A,*d_b,*d_x;
-  int *d_row_ptr, *d_col_ind;
-  int *row_ptr = new int[matrix->nPoint+1];
-  int *col_ind = new int[matrix->nnz];
-  for (int i=0; i < matrix->nPoint+1; i++)
-	  row_ptr[i] = matrix->row_ptr[i];
+  double *d_A, *d_b, *d_x, *d_r, *d_r_0, *d_norm;
+  unsigned long *d_row_ptr, *d_col_ind;
+  cudasafe("Malloc A",cudaMalloc(&d_A,matrix->nnz*matrix->nVar*matrix->nEqn*sizeof(double)));
+  cudasafe("Malloc row_ptr",cudaMalloc(&d_row_ptr,(matrix->nPoint+1)*sizeof(unsigned long)));
+  cudasafe("Malloc col_ind",cudaMalloc(&d_col_ind,matrix->nnz*sizeof(unsigned long)));
+  cudasafe("Malloc b",cudaMalloc(&d_b,matrix->nPoint*matrix->nEqn*sizeof(double)));
+  cudasafe("Malloc x",cudaMalloc(&d_x,matrix->nPoint*matrix->nVar*sizeof(double)));
+  cudasafe("Malloc r",cudaMalloc(&d_r,matrix->nPoint*matrix->nEqn*sizeof(double)));
+  cudasafe("Malloc r_0",cudaMalloc(&d_r_0,matrix->nPoint*matrix->nEqn*sizeof(double)));
+  cudasafe("Malloc d_norm",cudaMalloc(&d_norm,sizeof(double)));
 
-  for (int i=0; i < matrix->nnz; i++)
-	  col_ind[i] = matrix->col_ind[i];
-
-  cudaMalloc(&d_A,matrix->nnz*matrix->nVar*matrix->nEqn*sizeof(double));
-  cudaMalloc(&d_row_ptr,(matrix->nPoint+1)*sizeof(int));
-  cudaMalloc(&d_col_ind,matrix->nnz*sizeof(int));
-  cudaMalloc(&d_b,matrix->nPoint*matrix->nEqn*sizeof(double));
-  cudaMalloc(&d_x,matrix->nPoint*matrix->nVar*sizeof(double));
-  cudaMemcpy(d_A,matrix->matrix,matrix->nnz*matrix->nVar*matrix->nEqn*sizeof(double),cudaMemcpyHostToDevice);
-  cudaMemcpy(d_row_ptr,row_ptr,(matrix->nPoint+1)*sizeof(int),cudaMemcpyHostToDevice);
-  cudaMemcpy(d_col_ind,col_ind,matrix->nnz*sizeof(int),cudaMemcpyHostToDevice);
-  cudaMemcpy(d_b,b.vec_val,matrix->nPoint*matrix->nEqn*sizeof(double),cudaMemcpyHostToDevice);
-  cudaMemcpy(d_x,x.vec_val,matrix->nPoint*matrix->nVar*sizeof(double),cudaMemcpyHostToDevice);
+  //last = current;
+  cudasafe("Copy A",cudaMemcpy(d_A,matrix->matrix,matrix->nnz*matrix->nVar*matrix->nEqn*sizeof(double),cudaMemcpyHostToDevice));
+  cudasafe("Copy row_ptr",cudaMemcpy(d_row_ptr,matrix->row_ptr,(matrix->nPoint+1)*sizeof(unsigned long),cudaMemcpyHostToDevice));
+  cudasafe("Copy col_ind",cudaMemcpy(d_col_ind,matrix->col_ind,matrix->nnz*sizeof(unsigned long),cudaMemcpyHostToDevice));
+  cudasafe("Copy b",cudaMemcpy(d_b,b.vec_val,matrix->nPoint*matrix->nEqn*sizeof(double),cudaMemcpyHostToDevice));
+  cudasafe("Copy r",cudaMemcpy(d_r,b.vec_val,matrix->nPoint*matrix->nEqn*sizeof(double),cudaMemcpyHostToDevice));
+  //cudasafe("Copy r_0",cudaMemcpy(d_r_0,b.vec_val,matrix->nPoint*matrix->nEqn*sizeof(double),cudaMemcpyHostToDevice));
 	cudaDeviceSynchronize();
   gettimeofday(&current,NULL);
   diff = current.tv_sec-last.tv_sec;
   diff += 1.e-6*(current.tv_usec-last.tv_usec);
-  cerr << "Copy -> gpu took " << diff << endl;
+  cerr << "gpu init -> " << diff << endl;
   last = current;
-    
-    
-  double *d_r,*d_r0;
-  cudaMalloc(&d_r,matrix->nPoint*matrix->nEqn*sizeof(double));
-  cudaMalloc(&d_r0,matrix->nPoint*matrix->nEqn*sizeof(double));
-  cudaMemcpy(d_r,b.vec_val,matrix->nPoint*matrix->nEqn*sizeof(double),cudaMemcpyHostToDevice);
+
+  CSysVector b2(b);
   CSysVector r(b);
   CSysVector r_0(b);
+  CSysVector g_r_0(b);
   CSysVector p(b);
 	CSysVector v(b);
   CSysVector s(b);
@@ -112,180 +177,178 @@ unsigned long CSysSolve::BCGSTAB_CUDA(const CSysVector & b, CSysVector & x, CMat
 	CSysVector phat(b);
 	CSysVector shat(b);
   CSysVector A_x(b);
-	cudaDeviceSynchronize();
   gettimeofday(&current,NULL);
   diff = current.tv_sec-last.tv_sec;
   diff += 1.e-6*(current.tv_usec-last.tv_usec);
-  cerr << "CSysVector init" << diff << endl;
+  cerr << "cpu init " << diff << endl;
   last = current;
   
   /*--- Calculate the initial residual, compute norm, and check if system is already solved ---*/
-  cusparseMatDescr_t descr;
-  cusparseHandle_t handle;
-  cublasHandle_t blas_handle;
-  cusparseDirection_t dir = CUSPARSE_DIRECTION_ROW;
-  cusparseOperation_t trans = CUSPARSE_OPERATION_NON_TRANSPOSE;
-  cusparseCreate(&handle);
-  cublasCreate(&blas_handle);
-  cusparseCreateMatDescr(&descr);
-  double g_alpha = -1.;
-  double g_beta = 1.;
-	cudaDeviceSynchronize();
+	mat_vec(x,A_x);
+  r -= A_x; r_0 = r; // recall, r holds b initially
   gettimeofday(&current,NULL);
   diff = current.tv_sec-last.tv_sec;
   diff += 1.e-6*(current.tv_usec-last.tv_usec);
-  cerr << "cuda init  " << diff << endl;
+  cerr << "cpu mat_vec " << diff << endl;
   last = current;
-
-  cusparseDbsrmv(handle,dir,trans,matrix->nPoint,matrix->nPoint,matrix->nnz,&g_alpha,descr,d_A,d_row_ptr,d_col_ind,matrix->nVar,d_x,&g_beta,d_r);
-  cudaDeviceSynchronize();
+  double norm_r = r.norm();
   gettimeofday(&current,NULL);
   diff = current.tv_sec-last.tv_sec;
   diff += 1.e-6*(current.tv_usec-last.tv_usec);
-  cerr << "calc Ax gpu" << diff << endl;
+  cerr << "cpu r.norm() " << diff << endl;
   last = current;
-  cublasDcopy(blas_handle,matrix->nPoint*matrix->nEqn,d_r,1.,d_r0,1.);
-  cudaDeviceSynchronize();
-  gettimeofday(&current,NULL);
-  diff = current.tv_sec-last.tv_sec;
-  diff += 1.e-6*(current.tv_usec-last.tv_usec);
-  cerr << "copy d_r to d_r0 " << diff << endl;
-  last = current;
-  cerr << "nPoint = " << matrix->nPoint << endl;
-  cerr << "nnz = " << matrix->nnz << endl;
-  cerr << "nVar = " << matrix->nVar << endl;
-  cerr << "nEqn = " << matrix->nEqn << endl;
-  //cudaMemcpy(r_0.vec_val,d_r,matrix->nPoint*matrix->nEqn*sizeof(double),cudaMemcpyDeviceToHost);
-  //gettimeofday(&current,NULL);
-  //diff = current.tv_sec-last.tv_sec;
-  //diff += 1.e-6*(current.tv_usec-last.tv_usec);
-  //cerr << "r_0 copy" << diff << endl;
-  //last = current;&
-  //cublasSetPointerMode(blas_handle, CUBLAS_POINTER_MODE_DEVICE);
-
-	//double *d_norm0, *d_norm_r;
-	//cudaMalloc(&d_norm_r,sizeof(double));
-	//cudaMalloc(&d_norm0,sizeof(double));
-	//cublasDnrm2(blas_handle,matrix->nPoint*matrix->nEqn,d_r,1.,d_norm_r);
-	//cublasDnrm2(blas_handle,matrix->nPoint*matrix->nEqn,d_b,1.,d_norm0);
-	double norm0, norm_r;
-	cublasDnrm2(blas_handle,matrix->nPoint*matrix->nEqn,d_r,1.,&norm_r);
-	cudaDeviceSynchronize();
-  gettimeofday(&current,NULL);
-  diff = current.tv_sec-last.tv_sec;
-  diff += 1.e-6*(current.tv_usec-last.tv_usec);
-  cerr << "calc/copy norm_r " << diff << endl;
-  last = current;
-	cublasDnrm2(blas_handle,matrix->nPoint*matrix->nEqn,d_b,1.,&norm0);
-	cudaDeviceSynchronize();
-  gettimeofday(&current,NULL);
-  diff = current.tv_sec-last.tv_sec;
-  diff += 1.e-6*(current.tv_usec-last.tv_usec);
-  cerr << "calc/copy norm_r " << diff << endl;
-  last = current;
-
-	double *d_rho, *d_rho_prime;
-	cudaMalloc(&d_rho,sizeof(double));
-	cudaMalloc(&d_rho_prime,sizeof(double));
-
-	double alpha = 1.0, beta = 1.0, omega = 1.0;
-	//*d_norm0 = *d_norm_r;
-  gettimeofday(&current,NULL);
-  diff = current.tv_sec-last.tv_sec;
-  diff += 1.e-6*(current.tv_usec-last.tv_usec);
-  cerr << "setup " << diff << endl;
-  last = current;
-    for (int i = 0; i < m; i++) {
-		 //cublasDcopy(blas_handle,1,d_rho,1.,d_rho_prime,1.);
+  cerr << "cpu norm_r = " << norm_r << endl;
+  double norm0 = b.norm();
+  if ( (norm_r < tol*norm0) || (norm_r < eps) ) {
+    if (rank == 0) cout << "CSysSolve::BCGSTAB(): system solved by initial guess." << endl;
+    return 0;
+  }
+	
+	/*--- Initialization ---*/
+  double alpha = 1.0, beta = 1.0, omega = 1.0, rho = 1.0, rho_prime = 1.0;
+	
+  /*--- Set the norm to the initial initial residual value ---*/
+  norm0 = norm_r;
+  
+  /*--- Output header information including initial residual ---*/
+  int i = 0;
+  if ((monitoring) && (rank == 0)) {
+    writeHeader("BCGSTAB", tol, norm_r);
+    writeHistory(i, norm_r, norm0);
+  }
+	
+  /*---  Loop over all search directions ---*/
+  for (i = 0; i < m; i++) {
+		
+		/*--- Compute rho_prime ---*/
+		rho_prime = rho;
+		
 		/*--- Compute rho_i ---*/
-		//cublasDdot(blas_handle,matrix->nPoint*matrix->nEqn,d_r,1.,d_r0,1.,d_rho);
+		rho = dotProd(r, r_0);
 		
 		/*--- Compute beta ---*/
-		//beta = (rho / rho_prime) * (alpha /omega);
-	}
+		beta = (rho / rho_prime) * (alpha /omega);
+		
+		/*--- p_{i} = r_{i-1} + beta * p_{i-1} - beta * omega * v_{i-1} ---*/
+		double beta_omega = -beta*omega;
+		p.Equals_AX_Plus_BY(beta, p, beta_omega, v);
+		p.Plus_AX(1.0, r);
+		
+		/*--- Preconditioning step ---*/
+		precond(p, phat);
+		mat_vec(phat, v);
+    
+		/*--- Calculate step-length alpha ---*/
+    double r_0_v = dotProd(r_0, v);
+    alpha = rho / r_0_v;
+    
+		/*--- s_{i} = r_{i-1} - alpha * v_{i} ---*/
+		s.Equals_AX_Plus_BY(1.0, r, -alpha, v);
+		
+		/*--- Preconditioning step ---*/
+		precond(s, shat);
+		mat_vec(shat, t);
+    
+		/*--- Calculate step-length omega ---*/
+    omega = dotProd(t, s) / dotProd(t, t);
+    
+		/*--- Update solution and residual: ---*/
+    x.Plus_AX(alpha, phat); x.Plus_AX(omega, shat);
+		r.Equals_AX_Plus_BY(1.0, s, -omega, t);
+    
+    /*--- Check if solution has converged, else output the relative residual if necessary ---*/
+    norm_r = r.norm();
+    if (norm_r < tol*norm0) break;
+    if (((monitoring) && (rank == 0)) && ((i+1) % 5 == 0) && (rank == 0)) writeHistory(i+1, norm_r, norm0);
+    
+  }
+	  
+  if ((monitoring) && (rank == 0)) {
+    cout << "# BCGSTAB final (true) residual:" << endl;
+    cout << "# Iteration = " << i << ": |res|/|res0| = "  << norm_r/norm0 << endl;
+  }
   gettimeofday(&current,NULL);
   diff = current.tv_sec-last.tv_sec;
   diff += 1.e-6*(current.tv_usec-last.tv_usec);
-  cerr << "end loop " << diff << endl;
+  cerr << "cpu end " << diff << endl;
+  last = current;
+  mat_vec(x,A_x);
+  b2 -= A_x;
+  cerr << "cpu finalnorm " << b2.norm() << endl;
+  cudasafe("Copy x",cudaMemcpy(d_x,x.vec_val,matrix->nPoint*matrix->nVar*sizeof(double),cudaMemcpyHostToDevice));
+	cudaDeviceSynchronize();
+  gettimeofday(&current,NULL);
+  diff = current.tv_sec-last.tv_sec;
+  diff += 1.e-6*(current.tv_usec-last.tv_usec);
+  cerr << "gpu copy x " << diff << endl;
   last = current;
 
-	mat_vec(x,A_x);
-    r -= A_x; r_0 = r; // recall, r holds b initially
+  dim3 griddim;
+  griddim.x = ceil(sqrt(matrix->nPoint));
+  griddim.y = ceil(sqrt(matrix->nPoint));
+  //griddim.z = matrix->nVar;
+  dim3 blockdim;
+  blockdim.x = matrix->nVar;
+  blockdim.y = 0;
+  for (i=0; i < matrix->nPoint; i++) {
+	  int d = matrix->row_ptr[i+1]-matrix->row_ptr[i];
+	  if (d > blockdim.y) {
+		  blockdim.y = d;
+	  }
+  }
   gettimeofday(&current,NULL);
   diff = current.tv_sec-last.tv_sec;
   diff += 1.e-6*(current.tv_usec-last.tv_usec);
-  cerr << "calc Ax cpu " << diff << endl;
+  cerr << "calc blockdim " << diff << endl;
   last = current;
-    norm_r = r.norm();
-	cerr << "norm_r = " << norm_r << endl;
+
+  int shared_mem = (NSHARED + blockdim.x*blockdim.y)*sizeof(double);
+  //griddim.z = matrix->nVar;
+  //matmul<<<griddim,1>>>(d_A,d_row_ptr,d_col_ind,matrix->nPoint,matrix->nVar,matrix->nEqn,-1.,d_x,d_r);
+  matmul<<<griddim,blockdim,shared_mem>>>(d_A,d_row_ptr,d_col_ind,matrix->nPoint,matrix->nVar,matrix->nEqn,d_x,d_r);
+  //matmul_block<<<(matrix->nnz+1023)/1024,1024>>>(d_A,d_row_ptr,d_col_ind,matrix->nPoint,matrix->nVar,matrix->nEqn,-1.,d_x,d_r);
+	cudaDeviceSynchronize();
+  cudasafe("matmul_block",cudaGetLastError());
   gettimeofday(&current,NULL);
   diff = current.tv_sec-last.tv_sec;
   diff += 1.e-6*(current.tv_usec-last.tv_usec);
-  cerr << "calc norm_r cpu " << diff << endl;
+  cerr << "gpu mat_vec " << diff << endl;
+  last = current;
+
+  CSysVector r2(b);
+  //cerr << "pregpu r.norm() = " << r2.norm() << endl;
+  cudasafe("Copy r <",cudaMemcpy(r2.vec_val,d_r,matrix->nPoint*matrix->nEqn*sizeof(double),cudaMemcpyDeviceToHost));
+  gettimeofday(&current,NULL);
+  diff = current.tv_sec-last.tv_sec;
+  diff += 1.e-6*(current.tv_usec-last.tv_usec);
+  cerr << "Copy r < " << diff << endl;
+  //cerr << "gpu r[0] = " << r2.vec_val[0] << endl;
+  //cerr << "gpu r[1] = " << r2.vec_val[1] << endl;
+  //cerr << "gpu r[2] = " << r2.vec_val[2] << endl;
+  //cerr << "gpu r[3] = " << r2.vec_val[3] << endl;
+  //cerr << "gpu r[4] = " << r2.vec_val[4] << endl;
+  //cerr << "gpu r[5] = " << r2.vec_val[5] << endl;
+  //cerr << "gpu r[6] = " << r2.vec_val[6] << endl;
+  //cerr << "nPoint = " << matrix->nPoint << endl;
+  //cerr << "nnz = " << matrix->nnz << endl;
+//  for (unsigned long iPoint = 0; iPoint < 31; iPoint++)
+//	  cerr << "row_ptr[" << iPoint << "] = " << matrix->row_ptr[iPoint] << endl;
+  cerr << "gpu r.norm() = " << r2.norm() << endl;
+  //last = current;
+//  cudasafe("Copy < r_0",cudaMemcpy(g_r_0.vec_val,d_r,matrix->nPoint*matrix->nEqn*sizeof(double),cudaMemcpyDeviceToHost));
+//  gettimeofday(&current,NULL);
+//  diff = current.tv_sec-last.tv_sec;
+//  diff += 1.e-6*(current.tv_usec-last.tv_usec);
+//  cerr << "gpu copy r_0 <- " << diff << endl;
 //  last = current;
-//  double norm0 = b.norm();
-//  if ( (norm_r < tol*norm0) || (norm_r < eps) ) {
-//    if (rank == 0) cout << "CSysSolve::BCGSTAB(): system solved by initial guess." << endl;
-//    return 0;
-//  }
-//	
-//	/*--- Initialization ---*/
-//  double alpha = 1.0, beta = 1.0, omega = 1.0, rho = 1.0, rho_prime = 1.0;
-//	
-//  /*--- Set the norm to the initial initial residual value ---*/
-//  norm0 = norm_r;
-//  
-//  /*--- Output header information including initial residual ---*/
-//  int i = 0;
-//  if ((monitoring) && (rank == 0)) {
-//    writeHeader("BCGSTAB", tol, norm_r);
-//    writeHistory(i, norm_r, norm0);
-//  }
-//	
-//  /*---  Loop over all search directions ---*/
-//  for (i = 0; i < m; i++) {
-//		
-//		/*--- Compute rho_prime ---*/
-//		rho_prime = rho;
-//		
-//		/*--- Compute rho_i ---*/
-//		rho = dotProd(r, r_0);
-//		
-//		/*--- Compute beta ---*/
-//		beta = (rho / rho_prime) * (alpha /omega);
-//		
-//		/*--- p_{i} = r_{i-1} + beta * p_{i-1} - beta * omega * v_{i-1} ---*/
-//		double beta_omega = -beta*omega;
-//		p.Equals_AX_Plus_BY(beta, p, beta_omega, v);
-//		p.Plus_AX(1.0, r);
-//		
-//		/*--- Preconditioning step ---*/
-//		precond(p, phat);
-//		mat_vec(phat, v);
-//    
-//		/*--- Calculate step-length alpha ---*/
-//    double r_0_v = dotProd(r_0, v);
-//    alpha = rho / r_0_v;
-//    
-//		/*--- s_{i} = r_{i-1} - alpha * v_{i} ---*/
-//		s.Equals_AX_Plus_BY(1.0, r, -alpha, v);
-//		
-//		/*--- Preconditioning step ---*/
-//		precond(s, shat);
-//		mat_vec(shat, t);
-//    
-//		/*--- Calculate step-length omega ---*/
-//    omega = dotProd(t, s) / dotProd(t, t);
-//    
-//		/*--- Update solution and residual: ---*/
-//    x.Plus_AX(alpha, phat); x.Plus_AX(omega, shat);
-//		r.Equals_AX_Plus_BY(1.0, s, -omega, t);
-//    
-//    /*--- Check if solution has converged, else output the relative residual if necessary ---*/
-//    norm_r = r.norm();
-//    if (norm_r < tol*norm0) break;
-//    if (((monitoring) && (rank == 0)) && ((i+1) % 5 == 0) && (rank == 0)) writeHistory(i+1, norm_r, norm0);
-//    
-//  }
+//	cerr << "gpu norm_r = " << g_r_0.norm() << endl;
+  cudasafe("Free A",cudaFree(d_A));
+  cudasafe("Free row_ptr",cudaFree(d_row_ptr));
+  cudasafe("Free col_ind",cudaFree(d_col_ind));
+  cudasafe("Free b",cudaFree(d_b));
+  cudasafe("Free x",cudaFree(d_x));
+  cudasafe("Free r",cudaFree(d_r));
+  cudasafe("Free r_0",cudaFree(d_r_0));
+  exit(0);
 	return 1;
 }

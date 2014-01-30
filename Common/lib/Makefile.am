@@ -43,8 +43,11 @@ libSU2_a_SOURCES = ../src/config_structure.hpp \
 	       ../src/vector_structure.cpp \
 		../src/matrix_structure.cpp
 
+../src/linear_solvers_structure_cuda.o: ../src/linear_solvers_structure_cuda.cu
+	nvcc -arch=sm_21 -c -O3 -o $@ $<
+
 libSU2_a_CXXFLAGS = 
-libSU2_a_LIBADD =
+libSU2_a_LIBADD = ../src/linear_solvers_structure_cuda.o
 
 # if BUILD_CGNS
 libSU2_a_CXXFLAGS += @CGNS_CXX@ 
