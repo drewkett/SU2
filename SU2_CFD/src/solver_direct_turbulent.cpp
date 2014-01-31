@@ -652,7 +652,7 @@ void CTurbSolver::ImplicitEuler_Iteration(CGeometry *geometry, CSolver **solver_
   
   CSysSolve system;
   if (config->GetKind_Linear_Solver() == BCGSTAB)
-    system.BCGSTAB_CUDA(LinSysRes, LinSysSol, *mat_vec, *precond, config->GetLinear_Solver_Error(),
+    system.BCGSTAB(LinSysRes, LinSysSol, *mat_vec, *precond, config->GetLinear_Solver_Error(),
                    config->GetLinear_Solver_Iter(), false);
   else if (config->GetKind_Linear_Solver() == FGMRES)
     system.FGMRES(LinSysRes, LinSysSol, *mat_vec, *precond, config->GetLinear_Solver_Error(),

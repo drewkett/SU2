@@ -22,6 +22,9 @@
  */
 
 #include "../include/linear_solvers_structure.hpp"
+#include <sys/time.h>
+#include <CL/cl.hpp>
+#include "../include/matrix_structure.hpp"
 
 void CSysSolve::applyGivens(const double & s, const double & c, double & h1, double & h2) {
   
@@ -377,6 +380,39 @@ unsigned long CSysSolve::FGMRES(const CSysVector & b, CSysVector & x, CMatrixVec
   
 }
 
+string kernel_code =
+"\
+__kernel void  matmul(const double *A, unsigned long *row_ptr, unsigned long *col_ind, unsigned long nPoint, unsigned long nVar, unsigned long nEqn, double *x,double *r) { \
+  int iBlock, jBlock, iVar, jVar, index, block_index;
+  iBlock = 2*(blockIdx.x*gridDim.y + blockIdx.y);
+  iVar = threadIdx.x;
+  block[0] = row_ptr[iBlock];
+  block[1] = row_ptr[iBlock+1];
+  block[2] = row_ptr[iBlock+2];
+  __syncthreads();
+  iBlock = 2*(blockIdx.x*gridDim.y + blockIdx.y) + threadIdx.z;
+  if (iBlock >= nPoint) return;
+  block_index = NSHARED+threadIdx.z*blockDim.y*blockDim.x+threadIdx.x*blockDim.y+threadIdx.y;
+  block[block_index] = 0.;
+  //if (threadIdx.x >= row_ptr[iBlock+1]-row_ptr[iBlock]) return;
+  //index = row_ptr[iBlock]+threadIdx.y;
+  if (threadIdx.y >= block[1+threadIdx.z]-block[threadIdx.z]) return;
+  index = block[threadIdx.z]+threadIdx.y;
+  jBlock = col_ind[index];
+  double sum = 0.;
+  for (jVar = 0; jVar < nVar; jVar++) {
+    sum -= A[index*nVar*nEqn+iVar*nVar+jVar]*x[jBlock*nVar+jVar];
+  }
+  block[block_index] = sum;
+  if (threadIdx.y) return;
+  __syncthreads();
+  //for (index = 1; index < row_ptr[iBlock+1]-row_ptr[iBlock]; index++) {
+  for (index = 1; index < block[threadIdx.z+1]-block[threadIdx.z]; index++) {
+    block[block_index] += block[block_index+index];
+  }
+  r[iBlock*nEqn+iVar] += block[block_index];
+}";
+
 unsigned long CSysSolve::BCGSTAB(const CSysVector & b, CSysVector & x, CMatrixVectorProduct & mat_vec,
                                  CPreconditioner & precond, double tol, unsigned long m, bool monitoring) {
 	
@@ -396,6 +432,9 @@ unsigned long CSysSolve::BCGSTAB(const CSysVector & b, CSysVector & x, CMatrixVe
 #endif
   }
 	
+  struct timeval current, last;
+  double diff;
+  gettimeofday(&last,NULL);
   CSysVector r(b);
   CSysVector r_0(b);
   CSysVector p(b);
@@ -405,10 +444,20 @@ unsigned long CSysSolve::BCGSTAB(const CSysVector & b, CSysVector & x, CMatrixVe
 	CSysVector phat(b);
 	CSysVector shat(b);
   CSysVector A_x(b);
+  gettimeofday(&current,NULL);
+  diff = current.tv_sec-last.tv_sec;
+  diff += 1.e-6*(current.tv_usec-last.tv_usec);
+  cerr << "cpu init " << diff << endl;
+  last = current;
   
   /*--- Calculate the initial residual, compute norm, and check if system is already solved ---*/
 	mat_vec(x,A_x);
   r -= A_x; r_0 = r; // recall, r holds b initially
+  gettimeofday(&current,NULL);
+  diff = current.tv_sec-last.tv_sec;
+  diff += 1.e-6*(current.tv_usec-last.tv_usec);
+  cerr << "cpu matvec " << diff << endl;
+  last = current;
   double norm_r = r.norm();
   double norm0 = b.norm();
   if ( (norm_r < tol*norm0) || (norm_r < eps) ) {
@@ -479,6 +528,32 @@ unsigned long CSysSolve::BCGSTAB(const CSysVector & b, CSysVector & x, CMatrixVe
     cout << "# BCGSTAB final (true) residual:" << endl;
     cout << "# Iteration = " << i << ": |res|/|res0| = "  << norm_r/norm0 << endl;
   }
+  gettimeofday(&current,NULL);
+  diff = current.tv_sec-last.tv_sec;
+  diff += 1.e-6*(current.tv_usec-last.tv_usec);
+  cerr << "cpu end " << diff << endl;
+  last = current;
+
+	vector<Platform> platforms;
+	Platform::get(&platforms);
+
+	//cl_device_id device;
+	//clGetDeviceIds( platform, CL_DEVICE_TYPE_GPU, 1, &device, NULL);
+	//cl_context context = clCreateContext ( NULL, 1, &device, NULL, NULL, NULL);
+	//cl_command_queue queue = clCreateCommandQueue ( context, 1, &source, NULL, NULL);
+	//cl_program program = clCreateProgramWithSource ( context, 1, &source, NULL, NULL);
+	//clBuildProgram(program, 1, &device, NULL, NULL, NULL);
+	//cl_kernel kernel = clCreateKernel(program,"matmul",NULL);
+	//cl_mem buffer = clCreateBuffer(context, CL_MEM_WRITE_ONLY
+	//size_t global_work_size = 512;
+	//clSetKernelArg(kernel,0,sizeof(buffer),(void*)&buffer);
+	//clEnqueueNDRangeKernel(queue,kernel,1,NULL,&global_work_size,NULL,0,NULL,NULL);
+	//clFinish(queue);
+	//ptr = (cl_uint*) clEnqueueMapBuffer(queue,buffer,CL_TRUE,CL_MAP_READ,0,512*sizeof(cl_uint),0,NULL,NULL,NULL);
+	//int i;
+	//for (i=0; i<512; i++)
+	//	printf("%d %d\n",i,ptr[i])
+  exit(0);
 	
 //  /*--- Recalculate final residual (this should be optional) ---*/
 //	mat_vec(x, A_x);

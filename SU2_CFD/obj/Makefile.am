@@ -88,7 +88,7 @@ ___bin_SU2_CFD_SOURCES = ../include/definition_structure.hpp \
 		../src/variable_template.cpp
 
 ___bin_SU2_CFD_CXXFLAGS =
-___bin_SU2_CFD_LDADD = ../../Common/lib/libSU2.a ../../Common/src/linear_solvers_structure_cuda.o
+___bin_SU2_CFD_LDADD = ../../Common/lib/libSU2.a
 
 # if BUILD_CGNS
 ___bin_SU2_CFD_CXXFLAGS += @CGNS_CXX@

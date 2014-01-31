@@ -3974,7 +3974,7 @@ void CEulerSolver::ImplicitEuler_Iteration(CGeometry *geometry, CSolver **solver
   
   CSysSolve system;
   if (config->GetKind_Linear_Solver() == BCGSTAB)
-    IterLinSol = system.BCGSTAB_CUDA(LinSysRes, LinSysSol, *mat_vec, *precond, config->GetLinear_Solver_Error(),
+    IterLinSol = system.BCGSTAB(LinSysRes, LinSysSol, *mat_vec, *precond, config->GetLinear_Solver_Error(),
                                 config->GetLinear_Solver_Iter(), false);
   else if (config->GetKind_Linear_Solver() == FGMRES)
     IterLinSol = system.FGMRES(LinSysRes, LinSysSol, *mat_vec, *precond, config->GetLinear_Solver_Error(),
