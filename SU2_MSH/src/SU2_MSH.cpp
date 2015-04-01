@@ -130,10 +130,13 @@ int main(int argc, char *argv[]) {
 	cout << "Setting local point and element connectivity." <<endl;
 	geometry_container[ZONE_0]->SetPoint_Connectivity(); geometry_container[ZONE_0]->SetElement_Connectivity();
 	
+    geometry_container[ZONE_0]->SetBoundVolume();
 	/*--- Check the orientation before computing geometrical quantities ---*/
-  
-	cout << "Check numerical grid orientation." <<endl;
-	geometry_container[ZONE_0]->SetBoundVolume(); geometry_container[ZONE_0]->Check_IntElem_Orientation(config_container[ZONE_0]); geometry_container[ZONE_0]->Check_BoundElem_Orientation(config_container[ZONE_0]);
+    if (config_container[ZONE_0]->GetReorientElements()) {
+	  cout << "Check numerical grid orientation." <<endl;
+	  geometry_container[ZONE_0]->Check_IntElem_Orientation(config_container[ZONE_0]); 
+	  geometry_container[ZONE_0]->Check_BoundElem_Orientation(config_container[ZONE_0]);
+	}
 	
 	/*--- Create the edge structure ---*/
   
@@ -238,7 +241,11 @@ int main(int argc, char *argv[]) {
 		if (config_container[ZONE_0]->GetSmoothNumGrid()) {
 			cout << "Preprocessing for doing the implicit smoothing." << endl;
 			geo_adapt->SetPoint_Connectivity(); geo_adapt->SetElement_Connectivity();
-			geo_adapt->SetBoundVolume(); geo_adapt->Check_IntElem_Orientation(config_container[ZONE_0]); geo_adapt->Check_BoundElem_Orientation(config_container[ZONE_0]);
+			geo_adapt->SetBoundVolume();
+			if (config_container[ZONE_0]->GetReorientElements()) {
+			  geo_adapt->Check_IntElem_Orientation(config_container[ZONE_0]);
+			  geo_adapt->Check_BoundElem_Orientation(config_container[ZONE_0]);
+			}
 			geo_adapt->SetEdges(); geo_adapt->SetVertex(config_container[ZONE_0]);
 			cout << "Implicit smoothing of the numerical grid coordinates." << endl;
 			geo_adapt->SetCoord_Smoothing(5, 1.5, config_container[ZONE_0]);

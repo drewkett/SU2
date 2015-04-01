@@ -94,6 +94,7 @@ private:
 	Hold_GridFixed,	/*!< \brief Flag hold fixed some part of the mesh during the deformation. */
 	Axisymmetric, /*!< \brief Flag for axisymmetric calculations */
 	DebugMode, /*!< \brief Flag for debug mode */
+	ReorientElements, /*!< \brief Flag for enabling element reorientation */
   ionization;  /*!< \brief Flag for determining if free electron gas is in the mixture */
   double Damp_Engine_Inflow;	/*!< \brief Damping factor for the engine inlet. */
   double Damp_Engine_Bleed;	/*!< \brief Damping factor for the engine bleed. */
@@ -2557,6 +2558,12 @@ public:
 	 * \return Fluid model that we are using.
 	 */
 	unsigned short GetKind_FluidModel(void);
+
+	/*!
+	 * \brief Get information about reorienting elements.
+	 * \return <code>TRUE</code> if it reorients elements; otherwise <code>FALSE</code>.
+	 */
+	bool GetReorientElements(void);
 
 	/*!
 	 * \brief free stream option to initialize the solution
