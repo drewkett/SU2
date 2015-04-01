@@ -243,6 +243,8 @@ void CConfig::SetConfig_Options(unsigned short val_iZone, unsigned short val_nZo
   /*!\brief FLUID_MODEL \n DESCRIPTION: Fluid model \n OPTIONS: See \link FluidModel_Map \endlink \n Default: STANDARD_AIR \ingroup Config*/
   addEnumOption("FLUID_MODEL", Kind_FluidModel, FluidModel_Map, STANDARD_AIR);
 
+  /* DESCRIPTION: Automatically reorient elements that seem flipped */
+  addBoolOption("REORIENT_ELEMENTS",ReorientElements, true);
 
 
   /*!\par CONFIG_CATEGORY: Freestream Conditions \ingroup Config*/
